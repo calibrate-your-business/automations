@@ -1,0 +1,9 @@
+# Global agent-ops: keep the user-level corporate skill library (~/.claude/skills)
+# current from the shared skills repo. Public generic job; the private source repo
+# URL lives in the gitignored origins.local. The worked example of the automations
+# pattern: public tooling, private config.
+LABEL=com.cyb.skills-sync
+SCHEDULE=06:00
+RUNTIME=script
+COMMAND=python3 agent-ops/skills_sync.py
+WORKDIR=.

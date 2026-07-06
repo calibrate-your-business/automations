@@ -164,6 +164,13 @@ never into this repo.
   slot Claude reads at session start. Point Claude at one shared memory dir with
   `"autoMemoryDirectory": "~/.claude/memory"` in `~/.claude/settings.json` so a
   single curated file serves every project.
+- **`com.cyb.skills-sync`** -- keeps the user-level skill library
+  (`~/.claude/skills/`) current from a shared skills repo, so every session in
+  every project sees the same skills. This is the worked example of the whole
+  automations pattern: the job and its tooling are public and generic, while
+  the private source repo URL lives only in the gitignored `origins.local`
+  (env `SKILLS_REPO_URL` also works). Pruning is manifest-guarded -- the sync
+  only ever removes skills it installed, never a hand-placed one.
 
 These are a template as much as a feature: fork them, or write your own
 `agent-ops/` automations, and point `BRAIN_DB` wherever you keep your data.
