@@ -202,3 +202,7 @@ manager schedules:
   not; merge it to make it durable and portable.
 
 macOS-only today. See `FUTURE-WORK.md` for the OS-agnostic roadmap.
+
+## License
+
+MIT -- Copyright (c) 2026 Calibrate Your Business. See [LICENSE](LICENSE).
