@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# bin/install -- discover **/automations/*.autojob across registered source
+# repos, render launchd plists, and reconcile ~/Library/LaunchAgents to match.
+#
+# Usage:
+#   install            # full reconcile: install/update all discovered jobs,
+#   install all        #   and remove any previously-installed job no longer
+#                      #   declared (tracked via the manifest).
+#   install <path>     # install/update a single .autojob (no removal sweep).
+#
+# Idempotent. Re-run after editing any .autojob or registration, or from a fresh
+# checkout to re-bake absolute paths into the plists.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
+mkdir -p "$AUTO_LAUNCH_AGENTS" "$AUTO_LOG_BASE"
+
+# Install (render + bootstrap) the currently-parsed job. Bootout-then-bootstrap
+# so an edited schedule/command takes effect.
+install_parsed() {
+  local plist="$AUTO_LAUNCH_AGENTS/$JOB_LABEL.plist"
+  mkdir -p "$AUTO_LOG_BASE/$JOB_LABEL"
+  render_plist > "$plist"
+  launchctl bootout "$AUTO_GUI_DOMAIN/$JOB_LABEL" >/dev/null 2>&1 || true
+  if launchctl bootstrap "$AUTO_GUI_DOMAIN" "$plist" 2>/tmp/auto-bootstrap.$$; then
+    echo "  installed $JOB_LABEL ($JOB_SCHEDULE, $JOB_RUNTIME)"
+  else
+    echo "  ERROR bootstrapping $JOB_LABEL:" >&2
+    sed 's/^/    /' /tmp/auto-bootstrap.$$ >&2
+    rm -f "/tmp/auto-bootstrap.$$"
+    return 1
+  fi
+  rm -f "/tmp/auto-bootstrap.$$"
+}
+
+# Remove a label we previously installed (manifest cleanup path).
+remove_label() {
+  local label="$1"
+  launchctl bootout "$AUTO_GUI_DOMAIN/$label" >/dev/null 2>&1 || true
+  rm -f "$AUTO_LAUNCH_AGENTS/$label.plist"
+  echo "  removed $label (no longer declared)"
+}
+
+TARGET="${1:-all}"
+
+if [[ "$TARGET" != "all" ]]; then
+  # Single-job install. Resolve to an absolute path.
+  jobfile="$TARGET"
+  [[ "$jobfile" = /* ]] || jobfile="$(pwd)/$jobfile"
+  if ! parse_job "$jobfile"; then exit 1; fi
+  if [[ "$JOB_ENABLED" != "true" ]]; then
+    echo "automations: $JOB_LABEL is ENABLED=$JOB_ENABLED -- not installing"
+    exit 0
+  fi
+  echo "automations: installing single job"
+  install_parsed || exit 1
+  touch "$AUTO_MANIFEST"
+  grep -qxF "$JOB_LABEL" "$AUTO_MANIFEST" || echo "$JOB_LABEL" >> "$AUTO_MANIFEST"
+  exit 0
+fi
+
+# -------- full reconcile --------
+echo "automations: discovering *.autojob across registered source repos"
+JOBFILES=()
+while IFS= read -r line; do [[ -n "$line" ]] && JOBFILES+=("$line"); done < <(discover_jobs)
+
+DESIRED_LABELS=()
+SEEN_LABELS=""
+rc=0
+if [[ ${#JOBFILES[@]} -eq 0 ]]; then
+  echo "  no .autojob files found (check registrations/ and that the checkouts exist)"
+else
+  for jf in "${JOBFILES[@]}"; do
+    if ! parse_job "$jf"; then rc=1; continue; fi
+    # De-dup by LABEL, not by path: two files claiming one label is a hard error.
+    if printf '%s\n' "$SEEN_LABELS" | grep -qxF "$JOB_LABEL"; then
+      echo "  ERROR duplicate LABEL '$JOB_LABEL' at $jf -- already declared elsewhere" >&2
+      rc=1
+      continue
+    fi
+    SEEN_LABELS="$SEEN_LABELS
+$JOB_LABEL"
+    if [[ "$JOB_ENABLED" != "true" ]]; then
+      echo "  skipped $JOB_LABEL (ENABLED=$JOB_ENABLED)"
+      continue
+    fi
+    DESIRED_LABELS+=("$JOB_LABEL")
+    install_parsed || rc=1
+  done
+fi
+
+# Reconcile removals: anything in the previous manifest not desired now.
+if [[ -f "$AUTO_MANIFEST" ]]; then
+  while IFS= read -r prev || [[ -n "$prev" ]]; do
+    [[ -z "$prev" ]] && continue
+    keep=0
+    if [[ ${#DESIRED_LABELS[@]} -gt 0 ]]; then
+      for d in "${DESIRED_LABELS[@]}"; do [[ "$d" == "$prev" ]] && keep=1 && break; done
+    fi
+    [[ "$keep" -eq 0 ]] && remove_label "$prev"
+  done < "$AUTO_MANIFEST"
+fi
+
+# Rewrite the manifest to exactly the desired set.
+if [[ ${#DESIRED_LABELS[@]} -gt 0 ]]; then
+  printf '%s\n' "${DESIRED_LABELS[@]}" > "$AUTO_MANIFEST"
+else
+  : > "$AUTO_MANIFEST"
+fi
+
+echo "automations: reconcile done (${#DESIRED_LABELS[@]} job(s) active)"
+exit "$rc"

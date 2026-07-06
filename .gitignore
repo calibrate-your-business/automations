@@ -1,0 +1,11 @@
+# Registrations are local-only by default: a registration on disk works, but
+# is invisible to a clone of this repo. `git add -f registrations/<name>.repo`
+# to publish that source repo's participation.
+registrations/*.repo
+
+# Never commit the remote-URL map or any *.local file.
+origins.local
+*.local
+
+# Machine-local one-shot scripts (may reference private job names).
+one-shot/

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# bin/refresh -- fast-forward each registered source-repo checkout to its
+# branch tip, so newly-merged *.autojob files appear before `install`.
+#
+# Safe by the environment invariant: ~/Claude/<NAME> is the always-main primary
+# checkout, never committed to directly (dev happens in worktrees), so a
+# fast-forward pull always applies cleanly. A dirty/diverged checkout WARNs and
+# is skipped rather than reset.
+#
+# Usage: refresh   (no args)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
+export PATH="$AUTO_PATH"
+
+rc=0
+for reg in "$AUTO_REG_DIR"/*.repo; do
+  [[ -f "$reg" ]] || continue
+  name="$(reg_field "$reg" NAME)"
+  [[ -n "$name" ]] || continue
+  branch="$(reg_field "$reg" BRANCH)"; branch="${branch:-main}"
+  root="$AUTO_CLAUDE_HOME/$name"
+  if [[ ! -e "$root/.git" ]]; then
+    echo "  SKIP $name: no checkout at $root (run bootstrap)"
+    continue
+  fi
+  if [[ -n "$(git -C "$root" status --porcelain 2>/dev/null)" ]]; then
+    echo "  WARN $name: working tree dirty at $root -- not pulling"
+    continue
+  fi
+  if git -C "$root" fetch --quiet origin "$branch" 2>/dev/null && \
+     git -C "$root" merge --ff-only --quiet "origin/$branch" 2>/dev/null; then
+    echo "  ok   $name -> origin/$branch ($(git -C "$root" rev-parse --short HEAD))"
+  else
+    echo "  WARN $name: could not ff to origin/$branch (diverged?)"
+    rc=1
+  fi
+done
+exit "$rc"

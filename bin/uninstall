@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# bin/uninstall -- remove a job (or all) from launchd.
+# Boots the job out of the gui domain and deletes its plist. Leaves the
+# .autojob declaration and any logs untouched.
+#
+# Usage:
+#   uninstall <label>   # e.g. uninstall com.cyb.gsc-resubmit
+#   uninstall all       # remove every job this framework installed (manifest)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
+boot_out() {
+  local label="$1"
+  launchctl bootout "$AUTO_GUI_DOMAIN/$label" >/dev/null 2>&1 || true
+  rm -f "$AUTO_LAUNCH_AGENTS/$label.plist"
+  echo "  uninstalled $label"
+}
+
+TARGET="${1:-}"
+if [[ -z "$TARGET" ]]; then
+  echo "usage: uninstall <label|all>" >&2
+  exit 2
+fi
+
+if [[ "$TARGET" == "all" ]]; then
+  if [[ ! -s "$AUTO_MANIFEST" ]]; then
+    echo "automations: nothing installed (empty manifest)"
+    exit 0
+  fi
+  while IFS= read -r label || [[ -n "$label" ]]; do
+    [[ -z "$label" ]] && continue
+    boot_out "$label"
+  done < "$AUTO_MANIFEST"
+  : > "$AUTO_MANIFEST"
+  echo "automations: all jobs uninstalled"
+else
+  boot_out "$TARGET"
+  if [[ -f "$AUTO_MANIFEST" ]]; then
+    grep -vxF "$TARGET" "$AUTO_MANIFEST" > "$AUTO_MANIFEST.tmp" 2>/dev/null || true
+    mv -f "$AUTO_MANIFEST.tmp" "$AUTO_MANIFEST" 2>/dev/null || true
+  fi
+fi

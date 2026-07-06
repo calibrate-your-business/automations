@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# bin/bootstrap -- prepare a machine to run the automations: ensure each
+# registered source repo is checked out, verify prerequisites, then install.
+#
+# For each registration with a known remote (registrations/<name>.repo committed,
+# OR an entry in the gitignored origins.local), clone ~/Claude/<NAME> if absent.
+# Local-only registrations whose repo is not present are reported and skipped --
+# by design, a machine only runs the jobs whose source it has.
+#
+# Usage: bootstrap   (no args)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
+export PATH="$AUTO_PATH"
+ORIGINS="$AUTO_MANAGER_ROOT/origins.local"
+
+remote_for() {
+  local name="$1"
+  # origins.local wins (NAME=REMOTE lines); else a REMOTE field in the .repo.
+  if [[ -f "$ORIGINS" ]]; then
+    local r; r="$(reg_field "$ORIGINS" "$name")"
+    [[ -n "$r" ]] && { echo "$r"; return 0; }
+  fi
+  reg_field "$AUTO_REG_DIR/$name.repo" REMOTE
+}
+
+echo "automations: bootstrap"
+for reg in "$AUTO_REG_DIR"/*.repo; do
+  [[ -f "$reg" ]] || continue
+  name="$(reg_field "$reg" NAME)"; [[ -n "$name" ]] || continue
+  branch="$(reg_field "$reg" BRANCH)"; branch="${branch:-main}"
+  root="$AUTO_CLAUDE_HOME/$name"
+  if [[ -e "$root/.git" ]]; then
+    echo "  ok   $name present at $root"
+    continue
+  fi
+  remote="$(remote_for "$name")"
+  if [[ -z "$remote" ]]; then
+    echo "  SKIP $name: no checkout and no remote (add to origins.local to clone here)"
+    continue
+  fi
+  echo "  clone $name <- $remote ($branch)"
+  git clone --branch "$branch" "$remote" "$root" || echo "  ERROR cloning $name"
+done
+
+echo
+echo "automations: prerequisite check"
+[[ -f "$HOME/.config/sops/age/keys.txt" ]] && echo "  ok   age key" || echo "  WARN age key missing (~/.config/sops/age/keys.txt)"
+PATH="$AUTO_PATH" command -v claude >/dev/null && echo "  ok   claude on PATH" || echo "  WARN claude not found on AUTO_PATH"
+PATH="$AUTO_PATH" command -v jq >/dev/null && echo "  ok   jq on PATH" || echo "  WARN jq not found"
+
+echo
+echo "automations: installing"
+"$SCRIPT_DIR/install"
