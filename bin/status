@@ -2,7 +2,7 @@
 # bin/status -- the single pane of glass. For every discovered job: schedule,
 # runtime, whether launchd has it loaded, its last exit code, the last-success
 # marker time, and a HEALTH check that the plist's referenced lib.sh + .autojob
-# still exist (the check that would have caught the exit-127 outage on day one).
+# still exist (catches a moved checkout before launchd fails silently with 127).
 #
 # Usage: status   (no args)
 
@@ -46,7 +46,7 @@ while IFS= read -r line; do [[ -n "$line" ]] && JOBFILES+=("$line"); done < <(di
 
 echo "registered roots:"
 registered_roots | sed 's/^/  /'
-[[ -n "$(registered_roots)" ]] || echo "  (none -- check registrations/ and that ~/Claude/<NAME> exist)"
+[[ -n "$(registered_roots)" ]] || echo "  (none -- check registrations/ and that the sibling checkouts exist)"
 echo
 
 if [[ ${#JOBFILES[@]} -eq 0 ]]; then

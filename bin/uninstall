@@ -4,7 +4,7 @@
 # .autojob declaration and any logs untouched.
 #
 # Usage:
-#   uninstall <label>   # e.g. uninstall com.cyb.gsc-resubmit
+#   uninstall <label>   # e.g. uninstall com.example.nightly-report
 #   uninstall all       # remove every job this framework installed (manifest)
 
 set -uo pipefail

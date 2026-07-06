@@ -11,10 +11,11 @@ holds job bodies, so it can be public.
 
 ## Mental model
 
-- **Manager** (`~/Claude/automations`): `bin/` + `registrations/`.
+- **Manager** (this repo): `bin/` + `registrations/`.
 - **Jobs**: `*.autojob` files in a source repo, under an `automations/` dir at
   the level that owns the work. Discovered as `**/automations/*.autojob` in each
-  registered checkout `~/Claude/<NAME>`.
+  registered checkout `<repos-dir>/<NAME>` -- source repos live as siblings of
+  the manager (its parent dir; override with `AUTO_REPOS_HOME`).
 - **Deploy pointer** is the source repo's `main`: a job goes live when its
   `.autojob` is merged to main, then `refresh && install`.
 
@@ -35,7 +36,7 @@ holds job bodies, so it can be public.
 ## Registration schema (`registrations/<name>.repo`)
 
 ```
-NAME=<name>       # -> checkout ~/Claude/<NAME>
+NAME=<name>       # -> sibling checkout <repos-dir>/<NAME>
 BRANCH=main       # optional; default main
 ```
 

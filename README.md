@@ -1,71 +1,121 @@
 # automations
 
-A standalone, shareable manager for scheduled jobs on macOS (launchd). This repo
-holds only **tooling** and **registrations** -- the actual job definitions live
-in the source repos they serve, so this repo can be public without leaking what
-any job does.
+A small launchd job manager for macOS. Job definitions are `*.autojob` files
+that live in the repos they serve; this repo holds only the tooling that
+discovers, schedules, and monitors them. That split is the point: the manager
+can be public while every job stays private to its own repo.
 
-## Model
-
-- **Manager (this repo)** = `bin/` tooling + `registrations/`. Nothing here
-  reveals a job's schedule, command, or purpose.
-- **Jobs** = `*.autojob` files that live in the SOURCE repos, in an
-  `automations/` directory at whatever level owns the work (repo-root for a
-  single product, or deep in the tree for a subproject-scoped job). Discovered on
-  disk as `**/automations/*.autojob`.
-- **Registration** = `registrations/<name>.repo` (`NAME` + optional `BRANCH`).
-  It only names a source repo; the manager reads `~/Claude/<NAME>` for that
-  repo's jobs.
-- **Runtime** = `bin/lib.sh run <file>` (called by launchd). Sets a known-good
-  PATH, points sops at the age key, runs the job as a shell script or a headless
-  `claude -p` with a bounded tool allowlist, logs to
-  `~/Library/Logs/automations/<LABEL>/`, and notifies on failure.
-
-## Privacy invariant
-
-- **Registrations are gitignored by default** (`registrations/*.repo`). A
-  registration on disk works fully but is invisible to anyone who clones this
-  repo. `git add -f registrations/<name>.repo` publishes that repo's
-  participation (only its logical name -- never its jobs).
-- **Job bodies never enter this repo.** They live in their source repos.
-- **Remote URLs stay out** of git -- in the gitignored `origins.local`.
+You need macOS and git. The `claude` CLI ([Claude Code](https://claude.com/claude-code))
+is only required if you want jobs that run headless Claude sessions
+(`RUNTIME=claude`).
 
 ## Quickstart
 
+The fastest path is to let Claude Code do the setup:
+
 ```sh
-bin/bootstrap     # clone any missing source repos (from origins.local), verify
-                  # prereqs (age key, claude, jq), then install
-bin/status        # single pane of glass: schedule / launchd state / HEALTH / last-success
+git clone https://github.com/calibrate-your-business/automations.git
+cd automations
+claude
 ```
 
-## Add a source repo
+and prompt:
 
-1. `registrations/<name>.repo`:
+> Read the README and set up my project.
+
+Claude will follow the next section. Setting up by hand? The same steps work
+read as instructions to you.
+
+## Setup (for Claude)
+
+Execute these steps in order. Each one is checkable before moving on.
+
+1. **Verify prerequisites.**
+   - `uname` prints `Darwin`. This manager drives launchd; it is macOS-only
+     (see `FUTURE-WORK.md` for the portability roadmap).
+   - `git --version` succeeds.
+   - Ask the user whether they want scheduled headless Claude jobs
+     (`RUNTIME=claude`). If yes, `command -v claude` must succeed; if it does
+     not, stop and have them install and log in to Claude Code first.
+
+2. **Confirm the directory layout.** Source repos are discovered as siblings
+   of this checkout: `<parent-dir>/<NAME>`. Ask the user where their repos
+   live. If this repo is not already checked out next to them, re-clone it
+   there before continuing -- launchd runs jobs from baked absolute paths, so
+   the sibling layout is what makes everything resolve.
+
+3. **Register their first repo.** Ask which repo should get the first job
+   (any sibling git checkout works). Create `registrations/<name>.repo`:
+
    ```
    NAME=<name>
    BRANCH=main
    ```
-   Leave it gitignored (local-only) for a private repo; `git add -f` it to
-   publish participation for a public one.
-2. If a fresh machine should clone it, add `<name>=<git-remote-url>` to
-   `origins.local`.
 
-## Add a job
+   Tell the user this file is gitignored on purpose -- see "Privacy model"
+   below.
 
-1. In the source repo, create `<some/path>/automations/<name>.autojob`:
+4. **Create a starter job in THEIR repo** (not this one), at
+   `<their-repo>/automations/heartbeat.autojob`:
+
    ```
-   LABEL=com.example.my-job
-   SCHEDULE=09:00        # HH:MM
-   RUNTIME=script        # or: claude
-   COMMAND=./do-thing.sh # script: exe+args resolved at WORKDIR; claude: the prompt
-   WORKDIR=some/path     # relative to the owning repo root; default .
-   MODEL=claude-sonnet-5 # optional; claude runtime only -- model id/alias passed
-                         # to `claude --model`; absent = the CLI's default model
-   ENABLED=true          # optional; false = committed but not scheduled
+   LABEL=com.<name>.heartbeat
+   SCHEDULE=09:00
+   RUNTIME=script
+   COMMAND=echo "heartbeat ok: $(date)"
    ```
-   Put the `automations/` dir at the level that owns the job.
-2. Merge it to the source repo's `main` (the deploy pointer).
-3. `bin/refresh && bin/install` -> `bin/status` confirms it loaded.
+
+   If they want to watch it fire, set SCHEDULE a few minutes ahead of now.
+
+5. **Install and verify.** Run `bin/install`, then `bin/status`. The job's
+   LABEL must show LAUNCHD `loaded` and HEALTH `ok`.
+
+6. **Optionally trigger a run now:**
+
+   ```sh
+   launchctl kickstart -k gui/$(id -u)/com.<name>.heartbeat
+   ```
+
+   Then check the log under `~/Library/Logs/automations/<LABEL>/` and confirm
+   `bin/status` shows a LAST-SUCCESS timestamp.
+
+7. **Explain the day-to-day loop:** edit or add `.autojob` files in the source
+   repos, merge to their main branch, then `bin/refresh && bin/install` here.
+   `bin/status` is the single pane of glass.
+
+## How it works
+
+- **Manager (this repo)** = `bin/` tooling + `registrations/`. Nothing here
+  reveals a job's schedule, command, or purpose.
+- **Jobs** = `*.autojob` files in the source repos, in an `automations/`
+  directory at whatever level owns the work (repo root for a single product,
+  deeper for a subproject-scoped job). Discovered on disk as
+  `**/automations/*.autojob`.
+- **Registration** = `registrations/<name>.repo` (`NAME` + optional `BRANCH`).
+  It only names a source repo; the manager reads the sibling checkout
+  `<parent-dir>/<NAME>` for that repo's jobs.
+- **Runtime** = `bin/lib.sh run <file>`, called by launchd at the scheduled
+  time. It sets a known-good PATH, runs the job as a shell script or a
+  headless `claude -p` with a bounded tool allowlist (`Read Edit Write Bash
+  Glob Grep`, plus `--model` when the job pins one), logs to
+  `~/Library/Logs/automations/<LABEL>/`, and posts a macOS notification on
+  failure.
+
+## The .autojob format
+
+`KEY=value`, one per line; `#` comments allowed; the first `=` splits, so
+values may contain `=`.
+
+```
+LABEL=com.example.my-job   # launchd label, unique across all jobs
+SCHEDULE=09:00             # HH:MM daily
+RUNTIME=script             # or: claude
+COMMAND=./do-thing.sh      # script: exe+args run at WORKDIR; claude: the prompt
+WORKDIR=some/path          # optional; relative to the owning repo root; default .
+MODEL=claude-sonnet-5      # optional; claude runtime only -- passed to
+                           # `claude --model`; absent = the CLI's default model
+ENABLED=true               # optional; false = committed but not scheduled
+```
 
 ## Commands
 
@@ -77,5 +127,42 @@ bin/status        # single pane of glass: schedule / launchd state / HEALTH / la
 | `bin/status` | schedule / launchd / health / last-success table |
 | `bin/refresh` | ff-pull each registered checkout to pick up merged jobs |
 | `bin/bootstrap` | fresh machine: clone sources, verify prereqs, install |
+
+## Privacy model
+
+- **Registrations are local-only by default.** `registrations/*.repo` is
+  gitignored; a registration on disk works fully but is invisible to anyone
+  who clones this repo. `git add -f registrations/<name>.repo` publishes that
+  repo's participation -- only its logical name, never its jobs.
+- **Job bodies never enter this repo.** Schedules, commands, and prompts live
+  in the source repos, under whatever visibility those repos have.
+- **Remote URLs stay out of git** in the gitignored `origins.local`
+  (`NAME=<git-remote-url>` lines, used by `bin/bootstrap` to clone).
+
+## Works well with
+
+This manager is standalone -- it schedules jobs for any repo. It also pairs
+with its sibling projects, each of which can carry `.autojob` files that this
+manager schedules:
+
+- [brain](https://github.com/calibrate-your-business/brain) -- a knowledge
+  engine; schedule its ingest and maintenance jobs here.
+- [x-bookmarks](https://github.com/calibrate-your-business/x-bookmarks) -- a
+  worked example of an instrumented source repo that ships its own jobs.
+- [loops](https://github.com/calibrate-your-business/loops) -- a dev-loop
+  engine; schedule its recurring loops here.
+
+## Gotchas
+
+- **launchd's PATH is minimal.** The runtime sets its own PATH (Homebrew,
+  `~/.local/bin`, etc.); a job needing a tool outside that should use an
+  absolute path.
+- **Headless `claude` cannot answer permission prompts.** A job that must
+  commit, push, or similar has to authorize it explicitly in its prompt.
+- **Absolute paths are baked into plists at install time.** Re-run
+  `bin/install` after moving this repo or a source repo; `bin/status` HEALTH
+  flags a plist whose targets went missing.
+- **Discovery is by disk, not git.** An `.autojob` runs whether committed or
+  not; merge it to make it durable and portable.
 
 macOS-only today. See `FUTURE-WORK.md` for the OS-agnostic roadmap.

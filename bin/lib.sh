@@ -24,7 +24,9 @@ set -uo pipefail
 AUTO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"       # .../automations/bin
 AUTO_MANAGER_ROOT="$(cd "$AUTO_LIB_DIR/.." && pwd)"               # .../automations
 AUTO_REG_DIR="$AUTO_MANAGER_ROOT/registrations"
-AUTO_CLAUDE_HOME="$HOME/Claude"                                   # where <NAME> checkouts live
+# Source-repo checkouts live as SIBLINGS of this manager: <parent>/<NAME>.
+# Override with AUTO_REPOS_HOME in the environment if yours live elsewhere.
+AUTO_REPOS_HOME="${AUTO_REPOS_HOME:-$(dirname "$AUTO_MANAGER_ROOT")}"
 AUTO_LOG_BASE="$HOME/Library/Logs/automations"
 
 # launchd hands gui agents a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin).
@@ -150,8 +152,8 @@ owning_root() {
 }
 
 # Print each registered source-repo checkout that exists on disk. A registration
-# is registrations/<name>.repo with NAME=<name>; the checkout is
-# ~/Claude/<NAME>. Reads registrations off disk, so a gitignored (local-only)
+# is registrations/<name>.repo with NAME=<name>; the checkout is the sibling
+# <repos-home>/<NAME>. Reads registrations off disk, so a gitignored (local-only)
 # registration works exactly like a committed one.
 registered_roots() {
   local reg name root
@@ -159,7 +161,7 @@ registered_roots() {
     [[ -f "$reg" ]] || continue
     name="$(reg_field "$reg" NAME)"
     [[ -n "$name" ]] || continue
-    root="$AUTO_CLAUDE_HOME/$name"
+    root="$AUTO_REPOS_HOME/$name"
     [[ -e "$root/.git" ]] && echo "$root"
   done
 }

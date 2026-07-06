@@ -3,7 +3,8 @@
 # registered source repo is checked out, verify prerequisites, then install.
 #
 # For each registration with a known remote (registrations/<name>.repo committed,
-# OR an entry in the gitignored origins.local), clone ~/Claude/<NAME> if absent.
+# OR an entry in the gitignored origins.local), clone the sibling checkout
+# <repos-home>/<NAME> if absent.
 # Local-only registrations whose repo is not present are reported and skipped --
 # by design, a machine only runs the jobs whose source it has.
 #
@@ -33,7 +34,7 @@ for reg in "$AUTO_REG_DIR"/*.repo; do
   [[ -f "$reg" ]] || continue
   name="$(reg_field "$reg" NAME)"; [[ -n "$name" ]] || continue
   branch="$(reg_field "$reg" BRANCH)"; branch="${branch:-main}"
-  root="$AUTO_CLAUDE_HOME/$name"
+  root="$AUTO_REPOS_HOME/$name"
   if [[ -e "$root/.git" ]]; then
     echo "  ok   $name present at $root"
     continue
