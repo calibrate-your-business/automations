@@ -139,6 +139,35 @@ ENABLED=true               # optional; false = committed but not scheduled
 - **Remote URLs stay out of git** in the gitignored `origins.local`
   (`NAME=<git-remote-url>` lines, used by `bin/bootstrap` to clone).
 
+## Agent-ops (built-in global automations)
+
+Beyond scheduling other repos' jobs, this repo ships a few machine-global
+automations of its own -- they operate on the AGENT, not any one project.
+Their code lives in `agent-ops/`; their `*.autojob` files in `automations/`.
+They write DATA to a store you configure (`BRAIN_DB`, default `~/Claude/brain-db`),
+never into this repo.
+
+- **`com.cyb.session-capture`** -- flattens this machine's Claude Code session
+  transcripts into immutable raw markdown (delta-driven, secret-scrubbed). Each
+  record keeps the session's working directory so downstream analysis can ground
+  itself in the repo the session ran in.
+- **`com.cyb.session-learnings`** -- a headless `claude` pass that distills
+  operating rules + an anti-patterns page from the captured sessions, and emits
+  a report-only digest of recommended CLAUDE.md edits. It never edits a
+  CLAUDE.md; the [`review-recommendations`](.claude/skills/review-recommendations)
+  skill vets the digest with the owner, one item at a time.
+- **`com.cyb.recommendations-review`** -- alerts while a digest sits
+  un-dispositioned.
+- **`com.cyb.memory`** -- bidirectional Claude Code memory sync. Claude Code
+  writes auto-memory on its own; this job CAPTURES it into the store nightly and
+  RESTORES a curated canonical `MEMORY.md` (kept in the store, not here) into the
+  slot Claude reads at session start. Point Claude at one shared memory dir with
+  `"autoMemoryDirectory": "~/.claude/memory"` in `~/.claude/settings.json` so a
+  single curated file serves every project.
+
+These are a template as much as a feature: fork them, or write your own
+`agent-ops/` automations, and point `BRAIN_DB` wherever you keep your data.
+
 ## Works well with
 
 This manager is standalone -- it schedules jobs for any repo. It also pairs

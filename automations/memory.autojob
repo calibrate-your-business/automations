@@ -1,0 +1,8 @@
+# Global agent-ops: bidirectional Claude Code memory sync. CAPTURE native memory
+# into the store (brain-db raw), RESTORE the canonical memory (brain-db) into the
+# slot Claude reads at session start. Runs 03:05, before the learnings pass.
+LABEL=com.cyb.memory
+SCHEDULE=03:05
+RUNTIME=script
+COMMAND=python3 agent-ops/memory_sync.py
+WORKDIR=.

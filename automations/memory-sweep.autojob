@@ -1,7 +1,0 @@
-# Global agent-ops: sweep native ~/.claude memory files into the durable store
-# and remove them (Claude Code writes them regardless of instruction).
-LABEL=com.cyb.memory-sweep
-SCHEDULE=03:05
-RUNTIME=script
-COMMAND=python3 agent-ops/sweep_memory.py
-WORKDIR=.
