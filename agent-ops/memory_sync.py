@@ -102,6 +102,24 @@ def main():
     else:
         print(f"  WARN no canonical memory at {CANONICAL} -- nothing to restore", file=sys.stderr)
 
+    # Commit brain-db changes from this job (captured raw + a regenerated
+    # capabilities index) so nothing is left dirty for the next job. Best-effort.
+    import subprocess
+    try:
+        subprocess.run(["git", "-C", str(BRAIN_DB), "add", "memory", "raw/agent-memory"],
+                       check=False)
+        dirty = subprocess.run(["git", "-C", str(BRAIN_DB), "status", "--porcelain",
+                                "memory", "raw/agent-memory"],
+                               capture_output=True, text=True).stdout.strip()
+        if dirty:
+            subprocess.run(["git", "-C", str(BRAIN_DB), "commit", "-q", "-m",
+                            "memory: nightly sync (capture + capabilities index)"], check=False)
+            subprocess.run(["git", "-C", str(BRAIN_DB), "push", "-q", "origin", "main"],
+                           check=False)
+            print("  brain-db: committed + pushed memory-job changes")
+    except Exception as e:
+        print(f"  WARN brain-db commit skipped: {e}")
+
     print(f"memory-sync[{HOST}]: captured={captured} swept={deleted} "
           f"restored={'yes' if restored else 'no'} -> {AUTO_MEMORY_DIR}/MEMORY.md")
 
