@@ -1,0 +1,7 @@
+# Global agent-ops: flatten this machine's Claude Code session transcripts into
+# immutable raw. Mechanics only; the session-learnings pass distills them.
+LABEL=com.cyb.session-capture
+SCHEDULE=03:00
+RUNTIME=script
+COMMAND=python3 agent-ops/capture_sessions.py
+WORKDIR=.

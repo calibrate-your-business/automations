@@ -1,0 +1,7 @@
+# Global agent-ops: while a CLAUDE.md digest sits un-dispositioned, alert the
+# owner to review it (via the review-recommendations skill).
+LABEL=com.cyb.recommendations-review
+SCHEDULE=06:00
+RUNTIME=script
+COMMAND=agent-ops/check-recommendations.sh
+WORKDIR=.
