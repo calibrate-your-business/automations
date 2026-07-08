@@ -3,21 +3,27 @@
 #
 # Two roles:
 #   1. Sourced library. install/status/uninstall/refresh/bootstrap source this
-#      for the .autojob parser, plist renderer, registration + job discovery.
-#   2. launchd runtime entrypoint. Rendered plists call
+#      for the .autojob parser, the scheduler backend (unit rendering + the
+#      sched_* interface), registration + job discovery.
+#   2. Scheduler runtime entrypoint. Rendered units call
 #      `bash lib.sh run <abs-path-to-autojob>`; that sets up logging, runs the
 #      job's COMMAND, writes a last-success marker, and notifies on failure.
 #
 # Self-locating: AUTO_MANAGER_ROOT is derived from this file's path
-# ($AUTO_MANAGER_ROOT/bin/lib.sh), never from cwd, so it works under launchd
-# where cwd is undefined.
+# ($AUTO_MANAGER_ROOT/bin/lib.sh), never from cwd, so it works under launchd or
+# systemd where cwd is undefined.
 #
 # Model: this repo (the MANAGER) holds only registrations + tooling. The job
 # definitions (*.autojob) live in the registered SOURCE repos, in an
 # automations/ dir at whatever level owns the work, discovered on disk.
 #
-# ASCII-only. No external state beyond ~/Library/LaunchAgents and
-# ~/Library/Logs/automations.
+# Cross-platform: the scheduler, notifier, and path resolution are abstracted
+# behind a platform layer (see AUTO_OS below and the "scheduler backend"
+# section). macOS is backed by launchd; Linux by systemd user timers. The
+# .autojob schema, discovery, and commit-mode model are platform-neutral.
+#
+# ASCII-only. No external state beyond the platform unit dir and log base
+# resolved below (AUTO_UNIT_DIR / AUTO_LOG_BASE).
 
 set -uo pipefail
 
@@ -27,16 +33,36 @@ AUTO_REG_DIR="$AUTO_MANAGER_ROOT/registrations"
 # Source-repo checkouts live as SIBLINGS of this manager: <parent>/<NAME>.
 # Override with AUTO_REPOS_HOME in the environment if yours live elsewhere.
 AUTO_REPOS_HOME="${AUTO_REPOS_HOME:-$(dirname "$AUTO_MANAGER_ROOT")}"
-AUTO_LOG_BASE="$HOME/Library/Logs/automations"
 
-# launchd hands gui agents a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin).
-# Jobs need tools that live outside that (sops, gcloud, jq, node, claude).
-# Establish a known-good PATH for everything this lib runs.
-AUTO_PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/share/google-cloud-sdk/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# ---------------------------------------------------------------------------
+# platform resolution (path/dir + PATH; FUTURE-WORK item 3)
+# ---------------------------------------------------------------------------
+# AUTO_OS drives every platform branch below and in the scheduler/notifier.
+case "$(uname -s)" in
+  Darwin) AUTO_OS="darwin" ;;
+  Linux)  AUTO_OS="linux"  ;;
+  *)      AUTO_OS="unknown" ;;
+esac
 
-AUTO_LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-AUTO_MANIFEST="$AUTO_LAUNCH_AGENTS/.automations-manifest"
-AUTO_GUI_DOMAIN="gui/$(id -u)"
+# The scheduler hands jobs a minimal PATH. Jobs need tools that live outside it
+# (sops, gcloud, jq, node, claude). Establish a known-good PATH per platform.
+# AUTO_LOG_BASE = where per-job logs + last-success markers live.
+# AUTO_UNIT_DIR = where scheduler unit files live (launchd plists / systemd units).
+if [[ "$AUTO_OS" == "darwin" ]]; then
+  AUTO_LOG_BASE="$HOME/Library/Logs/automations"
+  AUTO_UNIT_DIR="$HOME/Library/LaunchAgents"
+  AUTO_PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/share/google-cloud-sdk/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+else
+  # Linux (and unknown fallback): XDG base dirs.
+  AUTO_LOG_BASE="${XDG_STATE_HOME:-$HOME/.local/state}/automations"
+  AUTO_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  AUTO_PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin"
+fi
+
+# Manifest lives alongside the units so a machine's installed-job record sits
+# with its scheduler state. On darwin this resolves to LaunchAgents (unchanged).
+AUTO_MANIFEST="$AUTO_UNIT_DIR/.automations-manifest"
+AUTO_GUI_DOMAIN="gui/$(id -u)"                                    # launchd only
 
 # RUNTIME=claude permissioning: a scheduled headless run cannot answer prompts,
 # so pre-approve exactly the tool set an analysis/report job needs and nothing
@@ -178,11 +204,14 @@ discover_jobs() {
 }
 
 # ---------------------------------------------------------------------------
-# plist rendering
+# scheduler backend: unit rendering (FUTURE-WORK item 1)
 # ---------------------------------------------------------------------------
-# Render the launchd plist for the currently-parsed job to stdout.
-# No RunAtLoad: jobs fire only on their StartCalendarInterval. launchd runs a
-# missed slot once on next wake.
+# Two renderers, one per platform, each emitting the scheduler unit(s) for the
+# currently-parsed job to stdout. Both point the scheduler at the same runtime
+# entrypoint: `bash lib.sh run <JOB_FILE>`.
+
+# macOS/launchd. No RunAtLoad: jobs fire only on their StartCalendarInterval.
+# launchd runs a missed slot once on next wake.
 render_plist() {
   local hour min launchlog
   hour="$(schedule_hour "$JOB_SCHEDULE")"
@@ -220,13 +249,209 @@ render_plist() {
 PLIST
 }
 
+# Linux/systemd user timer. A oneshot .service does the work; a .timer with
+# OnCalendar schedules it. Persistent=true replays a missed slot on next boot
+# (the launchd "missed slot on next wake" analog; FUTURE-WORK item 6). The pair
+# is rendered into AUTO_UNIT_DIR as <label>.service and <label>.timer.
+render_service() {
+  cat <<UNIT
+[Unit]
+Description=automations job $JOB_LABEL
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $AUTO_LIB_DIR/lib.sh run $JOB_FILE
+UNIT
+}
+
+render_timer() {
+  # OnCalendar wants HH:MM:SS in local time. JOB_SCHEDULE is validated HH:MM.
+  cat <<UNIT
+[Unit]
+Description=automations timer for $JOB_LABEL
+
+[Timer]
+OnCalendar=*-*-* $JOB_SCHEDULE:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
+# ---------------------------------------------------------------------------
+# scheduler backend: install / remove / state / health interface
+# ---------------------------------------------------------------------------
+# The bin/ scripts speak only to these four verbs; each dispatches on AUTO_OS.
+#
+#   sched_install         -- render + load unit(s) for the parsed JOB_* globals.
+#                            Prints an "installed ..." line on success; returns
+#                            non-zero (with detail on stderr) on failure.
+#   sched_remove <label>  -- unload + delete a label's unit(s). Idempotent.
+#   sched_state <label>   -- print a one-word scheduler state for `status`.
+#   sched_health <label>  -- print "ok" or "BROKEN:<reason>" (unit still points
+#                            at a real lib.sh + .autojob).
+
+sched_install() {
+  case "$AUTO_OS" in
+    darwin) _sched_install_launchd ;;
+    linux)  _sched_install_systemd ;;
+    *) echo "  ERROR unsupported OS '$(uname -s)' -- no scheduler backend" >&2; return 1 ;;
+  esac
+}
+
+_sched_install_launchd() {
+  local plist="$AUTO_UNIT_DIR/$JOB_LABEL.plist"
+  mkdir -p "$AUTO_LOG_BASE/$JOB_LABEL"
+  render_plist > "$plist"
+  launchctl bootout "$AUTO_GUI_DOMAIN/$JOB_LABEL" >/dev/null 2>&1 || true
+  local errfile; errfile="$(mktemp)"
+  if launchctl bootstrap "$AUTO_GUI_DOMAIN" "$plist" 2>"$errfile"; then
+    echo "  installed $JOB_LABEL ($JOB_SCHEDULE, $JOB_RUNTIME)"
+    rm -f "$errfile"
+  else
+    echo "  ERROR bootstrapping $JOB_LABEL:" >&2
+    sed 's/^/    /' "$errfile" >&2
+    rm -f "$errfile"
+    return 1
+  fi
+}
+
+_sched_install_systemd() {
+  local svc="$AUTO_UNIT_DIR/$JOB_LABEL.service"
+  local tmr="$AUTO_UNIT_DIR/$JOB_LABEL.timer"
+  mkdir -p "$AUTO_UNIT_DIR" "$AUTO_LOG_BASE/$JOB_LABEL"
+  render_service > "$svc"
+  render_timer > "$tmr"
+  # daemon-reload picks up edited unit contents; reenable fixes the symlink;
+  # restart re-reads OnCalendar and (re)arms the timer. All idempotent.
+  systemctl --user daemon-reload
+  systemctl --user reenable "$JOB_LABEL.timer" >/dev/null 2>&1 || true
+  if systemctl --user restart "$JOB_LABEL.timer" 2>/tmp/auto-systemd.$$; then
+    echo "  installed $JOB_LABEL ($JOB_SCHEDULE, $JOB_RUNTIME)"
+    rm -f "/tmp/auto-systemd.$$"
+  else
+    echo "  ERROR arming $JOB_LABEL.timer:" >&2
+    sed 's/^/    /' "/tmp/auto-systemd.$$" >&2
+    rm -f "/tmp/auto-systemd.$$"
+    return 1
+  fi
+}
+
+sched_remove() {
+  local label="$1"
+  case "$AUTO_OS" in
+    darwin)
+      launchctl bootout "$AUTO_GUI_DOMAIN/$label" >/dev/null 2>&1 || true
+      rm -f "$AUTO_UNIT_DIR/$label.plist"
+      ;;
+    linux)
+      systemctl --user disable --now "$label.timer" >/dev/null 2>&1 || true
+      rm -f "$AUTO_UNIT_DIR/$label.timer" "$AUTO_UNIT_DIR/$label.service"
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+sched_state() {
+  local label="$1"
+  case "$AUTO_OS" in
+    darwin) _sched_state_launchd "$label" ;;
+    linux)  _sched_state_systemd "$label" ;;
+    *) echo "no-backend" ;;
+  esac
+}
+
+# Pull "last exit code = N" from `launchctl print`. Prints a status word.
+_sched_state_launchd() {
+  local label="$1" out
+  out="$(launchctl print "$AUTO_GUI_DOMAIN/$label" 2>/dev/null)" || { echo "not-loaded"; return; }
+  local exitcode
+  exitcode="$(printf '%s\n' "$out" | sed -n 's/.*last exit code = \([0-9-]*\).*/\1/p' | head -1)"
+  if [[ -z "$exitcode" ]]; then
+    echo "loaded(norun)"
+  elif [[ "$exitcode" == "0" ]]; then
+    echo "loaded,exit0"
+  else
+    echo "loaded,EXIT$exitcode"
+  fi
+}
+
+# Timer armed? Then report the service's last run result. A oneshot that never
+# ran has an empty ExecMainExitTimestamp -> "loaded(norun)".
+_sched_state_systemd() {
+  local label="$1"
+  [[ "$(systemctl --user is-active "$label.timer" 2>/dev/null)" == "active" ]] || { echo "not-loaded"; return; }
+  local ran code
+  ran="$(systemctl --user show "$label.service" -p ExecMainExitTimestampMonotonic --value 2>/dev/null)"
+  if [[ -z "$ran" || "$ran" == "0" ]]; then
+    echo "loaded(norun)"
+    return
+  fi
+  code="$(systemctl --user show "$label.service" -p ExecMainStatus --value 2>/dev/null)"
+  if [[ "$code" == "0" ]]; then
+    echo "loaded,exit0"
+  else
+    echo "loaded,EXIT$code"
+  fi
+}
+
+sched_health() {
+  local label="$1"
+  case "$AUTO_OS" in
+    darwin) _sched_health_launchd "$label" ;;
+    linux)  _sched_health_systemd "$label" ;;
+    *) echo "BROKEN:no-backend" ;;
+  esac
+}
+
+# Confirm the installed plist still points at a real lib.sh and a real .autojob.
+_sched_health_launchd() {
+  local label="$1"
+  local plist="$AUTO_UNIT_DIR/$label.plist"
+  [[ -f "$plist" ]] || { echo "BROKEN:no-plist"; return; }
+  local lib job
+  lib="$(sed -n 's|.*<string>\(.*/lib.sh\)</string>.*|\1|p' "$plist" | head -1)"
+  job="$(sed -n 's|.*<string>\(.*\.autojob\)</string>.*|\1|p' "$plist" | head -1)"
+  [[ -n "$lib" && -f "$lib" ]] || { echo "BROKEN:lib-missing"; return; }
+  [[ -n "$job" && -f "$job" ]] || { echo "BROKEN:autojob-missing"; return; }
+  echo "ok"
+}
+
+# Confirm the installed .service ExecStart still points at a real lib.sh + job,
+# and that the .timer unit is present.
+_sched_health_systemd() {
+  local label="$1"
+  local svc="$AUTO_UNIT_DIR/$label.service"
+  local tmr="$AUTO_UNIT_DIR/$label.timer"
+  [[ -f "$svc" ]] || { echo "BROKEN:no-service"; return; }
+  [[ -f "$tmr" ]] || { echo "BROKEN:no-timer"; return; }
+  local lib job
+  lib="$(sed -n 's|.*ExecStart=/bin/bash \(.*/lib.sh\) run .*|\1|p' "$svc" | head -1)"
+  job="$(sed -n 's|.*/lib.sh run \(.*\)$|\1|p' "$svc" | head -1)"
+  [[ -n "$lib" && -f "$lib" ]] || { echo "BROKEN:lib-missing"; return; }
+  [[ -n "$job" && -f "$job" ]] || { echo "BROKEN:autojob-missing"; return; }
+  echo "ok"
+}
+
 # ---------------------------------------------------------------------------
 # runtime: execute one job (called by launchd via `lib.sh run <jobfile>`)
 # ---------------------------------------------------------------------------
+# Platform notifier (FUTURE-WORK item 2). Best-effort; never let a notify
+# failure mask the job's own exit code.
+notify() {
+  local title="$1" msg="$2"
+  case "$AUTO_OS" in
+    darwin) osascript -e "display notification \"$msg\" with title \"$title\"" >/dev/null 2>&1 || true ;;
+    linux)  notify-send "$title" "$msg" >/dev/null 2>&1 || true ;;
+  esac
+}
+
 notify_failure() {
   local label="$1" code="$2"
-  # Best-effort macOS notification; never let a notify failure mask the job's.
-  osascript -e "display notification \"exited $code -- see Library/Logs/automations\" with title \"automation failed: $label\"" >/dev/null 2>&1 || true
+  notify "automation failed: $label" "exited $code -- see logs under $AUTO_LOG_BASE"
 }
 
 run_job() {

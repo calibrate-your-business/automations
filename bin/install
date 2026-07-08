@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bin/install -- discover **/automations/*.autojob across registered source
-# repos, render launchd plists, and reconcile ~/Library/LaunchAgents to match.
+# repos, render scheduler units (launchd plists / systemd timers), and
+# reconcile the platform unit dir to match.
 #
 # Usage:
 #   install            # full reconcile: install/update all discovered jobs,
@@ -17,31 +18,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
-mkdir -p "$AUTO_LAUNCH_AGENTS" "$AUTO_LOG_BASE"
+mkdir -p "$AUTO_UNIT_DIR" "$AUTO_LOG_BASE"
 
-# Install (render + bootstrap) the currently-parsed job. Bootout-then-bootstrap
-# so an edited schedule/command takes effect.
+# Install (render + load) the currently-parsed job via the scheduler backend.
+# Idempotent: re-running picks up an edited schedule/command.
 install_parsed() {
-  local plist="$AUTO_LAUNCH_AGENTS/$JOB_LABEL.plist"
-  mkdir -p "$AUTO_LOG_BASE/$JOB_LABEL"
-  render_plist > "$plist"
-  launchctl bootout "$AUTO_GUI_DOMAIN/$JOB_LABEL" >/dev/null 2>&1 || true
-  if launchctl bootstrap "$AUTO_GUI_DOMAIN" "$plist" 2>/tmp/auto-bootstrap.$$; then
-    echo "  installed $JOB_LABEL ($JOB_SCHEDULE, $JOB_RUNTIME)"
-  else
-    echo "  ERROR bootstrapping $JOB_LABEL:" >&2
-    sed 's/^/    /' /tmp/auto-bootstrap.$$ >&2
-    rm -f "/tmp/auto-bootstrap.$$"
-    return 1
-  fi
-  rm -f "/tmp/auto-bootstrap.$$"
+  sched_install
 }
 
 # Remove a label we previously installed (manifest cleanup path).
 remove_label() {
   local label="$1"
-  launchctl bootout "$AUTO_GUI_DOMAIN/$label" >/dev/null 2>&1 || true
-  rm -f "$AUTO_LAUNCH_AGENTS/$label.plist"
+  sched_remove "$label"
   echo "  removed $label (no longer declared)"
 }
 

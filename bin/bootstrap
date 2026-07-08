@@ -49,10 +49,18 @@ for reg in "$AUTO_REG_DIR"/*.repo; do
 done
 
 echo
-echo "automations: prerequisite check"
+echo "automations: prerequisite check ($AUTO_OS)"
 [[ -f "$HOME/.config/sops/age/keys.txt" ]] && echo "  ok   age key" || echo "  WARN age key missing (~/.config/sops/age/keys.txt)"
 PATH="$AUTO_PATH" command -v claude >/dev/null && echo "  ok   claude on PATH" || echo "  WARN claude not found on AUTO_PATH"
 PATH="$AUTO_PATH" command -v jq >/dev/null && echo "  ok   jq on PATH" || echo "  WARN jq not found"
+if [[ "$AUTO_OS" == "linux" ]]; then
+  if systemctl --user show-environment >/dev/null 2>&1; then echo "  ok   systemd user manager"; else echo "  WARN no systemd user manager (systemctl --user unavailable)"; fi
+  if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" == "yes" ]]; then
+    echo "  ok   linger enabled (timers fire while logged out)"
+  else
+    echo "  WARN linger off -- run: loginctl enable-linger \"$USER\" (else jobs wait for next login)"
+  fi
+fi
 
 echo
 echo "automations: installing"

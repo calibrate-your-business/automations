@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # bin/status -- the single pane of glass. For every discovered job: schedule,
-# runtime, whether launchd has it loaded, its last exit code, the last-success
-# marker time, and a HEALTH check that the plist's referenced lib.sh + .autojob
-# still exist (catches a moved checkout before launchd fails silently with 127).
+# runtime, whether the scheduler has it loaded, its last exit code, the
+# last-success marker time, and a HEALTH check that the installed unit's
+# referenced lib.sh + .autojob still exist (catches a moved checkout before the
+# scheduler fails silently). Backend-agnostic: launchd on macOS, systemd on Linux.
 #
 # Usage: status   (no args)
 
@@ -11,35 +12,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/lib.sh
 source "$SCRIPT_DIR/lib.sh"
-
-# Pull "last exit code = N" from `launchctl print`. Prints a status word.
-launchd_state() {
-  local label="$1" out
-  out="$(launchctl print "$AUTO_GUI_DOMAIN/$label" 2>/dev/null)" || { echo "not-loaded"; return; }
-  local exitcode
-  exitcode="$(printf '%s\n' "$out" | sed -n 's/.*last exit code = \([0-9-]*\).*/\1/p' | head -1)"
-  if [[ -z "$exitcode" ]]; then
-    echo "loaded(norun)"
-  elif [[ "$exitcode" == "0" ]]; then
-    echo "loaded,exit0"
-  else
-    echo "loaded,EXIT$exitcode"
-  fi
-}
-
-# Confirm the installed plist still points at a real lib.sh and a real .autojob.
-# Prints "ok" or a specific BROKEN reason.
-health() {
-  local label="$1"
-  local plist="$AUTO_LAUNCH_AGENTS/$label.plist"
-  [[ -f "$plist" ]] || { echo "BROKEN:no-plist"; return; }
-  local lib job
-  lib="$(sed -n 's|.*<string>\(.*/lib.sh\)</string>.*|\1|p' "$plist" | head -1)"
-  job="$(sed -n 's|.*<string>\(.*\.autojob\)</string>.*|\1|p' "$plist" | head -1)"
-  [[ -n "$lib" && -f "$lib" ]] || { echo "BROKEN:lib-missing"; return; }
-  [[ -n "$job" && -f "$job" ]] || { echo "BROKEN:autojob-missing"; return; }
-  echo "ok"
-}
 
 JOBFILES=()
 while IFS= read -r line; do [[ -n "$line" ]] && JOBFILES+=("$line"); done < <(discover_jobs)
@@ -54,7 +26,7 @@ if [[ ${#JOBFILES[@]} -eq 0 ]]; then
   exit 0
 fi
 
-printf '%-26s %-6s %-24s %-14s %-16s %s\n' "LABEL" "SCHED" "RUNTIME" "LAUNCHD" "HEALTH" "LAST-SUCCESS"
+printf '%-26s %-6s %-24s %-14s %-16s %s\n' "LABEL" "SCHED" "RUNTIME" "SCHEDULER" "HEALTH" "LAST-SUCCESS"
 printf '%-26s %-6s %-24s %-14s %-16s %s\n' "-----" "-----" "-------" "-------" "------" "------------"
 for jf in "${JOBFILES[@]}"; do
   if ! parse_job "$jf" 2>/dev/null; then
@@ -66,5 +38,5 @@ for jf in "${JOBFILES[@]}"; do
   en=""; [[ "$JOB_ENABLED" != "true" ]] && en=" (ENABLED=$JOB_ENABLED)"
   rt="$JOB_RUNTIME"; [[ -n "$JOB_MODEL" ]] && rt="$JOB_RUNTIME($JOB_MODEL)"
   printf '%-26s %-6s %-24s %-14s %-16s %s\n' \
-    "$JOB_LABEL" "$JOB_SCHEDULE" "$rt" "$(launchd_state "$JOB_LABEL")" "$(health "$JOB_LABEL")" "$last$en"
+    "$JOB_LABEL" "$JOB_SCHEDULE" "$rt" "$(sched_state "$JOB_LABEL")" "$(sched_health "$JOB_LABEL")" "$last$en"
 done

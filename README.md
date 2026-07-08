@@ -1,13 +1,15 @@
 # automations
 
-A small launchd job manager for macOS. Job definitions are `*.autojob` files
-that live in the repos they serve; this repo holds only the tooling that
-discovers, schedules, and monitors them. That split is the point: the manager
-can be public while every job stays private to its own repo.
+A small scheduled-job manager for macOS and Linux. Job definitions are
+`*.autojob` files that live in the repos they serve; this repo holds only the
+tooling that discovers, schedules, and monitors them. That split is the point:
+the manager can be public while every job stays private to its own repo.
 
-You need macOS and git. The `claude` CLI ([Claude Code](https://claude.com/claude-code))
-is only required if you want jobs that run headless Claude sessions
-(`RUNTIME=claude`).
+The scheduler backend is chosen by platform: **launchd** on macOS, **systemd
+user timers** on Linux (both give per-job isolation and replay a missed slot on
+next wake). You need macOS or Linux, and git. The `claude` CLI
+([Claude Code](https://claude.com/claude-code)) is only required if you want
+jobs that run headless Claude sessions (`RUNTIME=claude`).
 
 ## Quickstart
 
@@ -31,8 +33,10 @@ read as instructions to you.
 Execute these steps in order. Each one is checkable before moving on.
 
 1. **Verify prerequisites.**
-   - `uname` prints `Darwin`. This manager drives launchd; it is macOS-only
-     (see `FUTURE-WORK.md` for the portability roadmap).
+   - `uname` prints `Darwin` (macOS, launchd backend) or `Linux` (systemd
+     backend). On Linux, `systemctl --user show-environment` must succeed (a
+     systemd user manager); for jobs to fire while logged out, enable a lingering
+     user manager once: `loginctl enable-linger "$USER"`.
    - `git --version` succeeds.
    - Ask the user whether they want scheduled headless Claude jobs
      (`RUNTIME=claude`). If yes, `command -v claude` must succeed; if it does
@@ -41,8 +45,8 @@ Execute these steps in order. Each one is checkable before moving on.
 2. **Confirm the directory layout.** Source repos are discovered as siblings
    of this checkout: `<parent-dir>/<NAME>`. Ask the user where their repos
    live. If this repo is not already checked out next to them, re-clone it
-   there before continuing -- launchd runs jobs from baked absolute paths, so
-   the sibling layout is what makes everything resolve.
+   there before continuing -- the scheduler runs jobs from baked absolute paths,
+   so the sibling layout is what makes everything resolve.
 
 3. **Register their first repo.** Ask which repo should get the first job
    (any sibling git checkout works). Create `registrations/<name>.repo`:
@@ -68,15 +72,19 @@ Execute these steps in order. Each one is checkable before moving on.
    If they want to watch it fire, set SCHEDULE a few minutes ahead of now.
 
 5. **Install and verify.** Run `bin/install`, then `bin/status`. The job's
-   LABEL must show LAUNCHD `loaded` and HEALTH `ok`.
+   LABEL must show SCHEDULER `loaded` and HEALTH `ok`.
 
 6. **Optionally trigger a run now:**
 
    ```sh
+   # macOS
    launchctl kickstart -k gui/$(id -u)/com.<name>.heartbeat
+   # Linux
+   systemctl --user start com.<name>.heartbeat.service
    ```
 
-   Then check the log under `~/Library/Logs/automations/<LABEL>/` and confirm
+   Then check the log under the platform log base (`~/Library/Logs/automations/`
+   on macOS, `~/.local/state/automations/` on Linux) `<LABEL>/` and confirm
    `bin/status` shows a LAST-SUCCESS timestamp.
 
 7. **Explain the day-to-day loop:** edit or add `.autojob` files in the source
@@ -94,12 +102,18 @@ Execute these steps in order. Each one is checkable before moving on.
 - **Registration** = `registrations/<name>.repo` (`NAME` + optional `BRANCH`).
   It only names a source repo; the manager reads the sibling checkout
   `<parent-dir>/<NAME>` for that repo's jobs.
-- **Runtime** = `bin/lib.sh run <file>`, called by launchd at the scheduled
-  time. It sets a known-good PATH, runs the job as a shell script or a
-  headless `claude -p` with a bounded tool allowlist (`Read Edit Write Bash
-  Glob Grep`, plus `--model` when the job pins one), logs to
-  `~/Library/Logs/automations/<LABEL>/`, and posts a macOS notification on
-  failure.
+- **Runtime** = `bin/lib.sh run <file>`, called by the scheduler (launchd /
+  systemd) at the scheduled time. It sets a known-good PATH, runs the job as a
+  shell script or a headless `claude -p` with a bounded tool allowlist (`Read
+  Edit Write Bash Glob Grep`, plus `--model` when the job pins one), logs to the
+  platform log base (`~/Library/Logs/automations/<LABEL>/` on macOS,
+  `~/.local/state/automations/<LABEL>/` on Linux), and posts a desktop
+  notification (`osascript` / `notify-send`) on failure.
+- **Scheduler backend** = a small platform layer in `bin/lib.sh`
+  (`sched_install` / `sched_remove` / `sched_state` / `sched_health`). launchd
+  renders a plist; systemd renders a `oneshot` `.service` + a `.timer`
+  (`OnCalendar`, `Persistent=true`). Everything above this layer is identical
+  across platforms.
 
 ## The .autojob format
 
@@ -107,7 +121,7 @@ Execute these steps in order. Each one is checkable before moving on.
 values may contain `=`.
 
 ```
-LABEL=com.example.my-job   # launchd label, unique across all jobs
+LABEL=com.example.my-job   # scheduler label/unit name, unique across all jobs
 SCHEDULE=09:00             # HH:MM daily
 RUNTIME=script             # or: claude
 COMMAND=./do-thing.sh      # script: exe+args run at WORKDIR; claude: the prompt
@@ -121,10 +135,10 @@ ENABLED=true               # optional; false = committed but not scheduled
 
 | Command | What it does |
 |---|---|
-| `bin/install [all]` | discover `*.autojob`, render + reconcile launchd plists |
+| `bin/install [all]` | discover `*.autojob`, render + reconcile scheduler units |
 | `bin/install <path>` | install one `.autojob` |
-| `bin/uninstall <label\|all>` | remove from launchd |
-| `bin/status` | schedule / launchd / health / last-success table |
+| `bin/uninstall <label\|all>` | remove from the scheduler |
+| `bin/status` | schedule / scheduler-state / health / last-success table |
 | `bin/refresh` | ff-pull each registered checkout to pick up merged jobs |
 | `bin/bootstrap` | fresh machine: clone sources, verify prereqs, install |
 
@@ -190,18 +204,23 @@ manager schedules:
 
 ## Gotchas
 
-- **launchd's PATH is minimal.** The runtime sets its own PATH (Homebrew,
-  `~/.local/bin`, etc.); a job needing a tool outside that should use an
-  absolute path.
+- **The scheduler's PATH is minimal.** The runtime sets its own PATH (Homebrew
+  or `/usr/local` + `~/.local/bin`, etc.); a job needing a tool outside that
+  should use an absolute path.
 - **Headless `claude` cannot answer permission prompts.** A job that must
   commit, push, or similar has to authorize it explicitly in its prompt.
-- **Absolute paths are baked into plists at install time.** Re-run
-  `bin/install` after moving this repo or a source repo; `bin/status` HEALTH
-  flags a plist whose targets went missing.
+- **Absolute paths are baked into units at install time.** Re-run `bin/install`
+  after moving this repo or a source repo; `bin/status` HEALTH flags a unit
+  whose targets went missing.
+- **Linux: enable linger for logged-out runs.** systemd user timers only fire
+  while a user manager is running. `loginctl enable-linger "$USER"` keeps it
+  running across logout/reboot -- otherwise a 03:00 job waits for your next login.
 - **Discovery is by disk, not git.** An `.autojob` runs whether committed or
   not; merge it to make it durable and portable.
 
-macOS-only today. See `FUTURE-WORK.md` for the OS-agnostic roadmap.
+macOS (launchd) and Linux (systemd user timers) are supported. See
+`FUTURE-WORK.md` for the remaining roadmap (Windows, cron fallback, richer tool
+discovery).
 
 ## License
 
