@@ -80,6 +80,31 @@ def capture_one(mf, project, delete):
     return (1 if verified else 0), 0
 
 
+def slot_is_read():
+    """True iff this machine's Claude Code reads AUTO_MEMORY_DIR at session start
+    -- i.e. an effective `autoMemoryDirectory` setting resolves to it. On a
+    per-project-memory machine (setting absent) this is False: restoring into the
+    slot would write a dir nothing reads. There, global memory is delivered by a
+    CLAUDE.md @import of the brain-db canonical instead (see the memory-sync
+    design)."""
+    import json
+    val = None
+    for cfg in (HOME / ".claude" / "settings.json",
+                HOME / ".claude" / "settings.local.json"):   # local overrides base
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get("autoMemoryDirectory"):
+            val = data["autoMemoryDirectory"]
+    if not val:
+        return False
+    try:
+        return pathlib.Path(os.path.expanduser(val)).resolve() == AUTO_MEMORY_DIR.resolve()
+    except Exception:
+        return False
+
+
 def main():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     captured = deleted = 0
@@ -99,15 +124,23 @@ def main():
         for mf in sorted(glob.glob(str(root / "projects" / "*" / "memory" / "*.md"))):
             mf = pathlib.Path(mf)
             project = mf.parent.parent.name.lstrip("-")
+            if project.endswith("-worktree"):
+                continue          # transient worktree session, not a real project
             c, d = capture_one(mf, project, delete=False)
             captured += c; deleted += d
 
-    # RESTORE: canonical -> the native slot Claude reads at session start. Also
-    # surface this machine's LOCAL capabilities catalog into the slot alongside
-    # it (read-only local copies -- neither is pushed). The canonical MEMORY.md
-    # is machine-agnostic and points at the per-machine CAPABILITIES.md.
+    # RESTORE: canonical -> the native slot, plus this machine's LOCAL
+    # capabilities catalog alongside it (read-only local copies; neither pushed).
+    # ONLY on a machine that actually reads the slot (autoMemoryDirectory resolves
+    # to it). On a per-project-memory machine the slot is unread, so writing it
+    # would be misleading -- global memory there arrives via a CLAUDE.md @import
+    # of the brain-db canonical instead.
     restored = False
-    if CANONICAL.exists():
+    if not slot_is_read():
+        print(f"  RESTORE skipped: autoMemoryDirectory does not resolve to "
+              f"{AUTO_MEMORY_DIR} (per-project machine; global memory loads via "
+              f"CLAUDE.md @import)")
+    elif CANONICAL.exists():
         AUTO_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(CANONICAL, AUTO_MEMORY_DIR / "MEMORY.md")
         restored = True
