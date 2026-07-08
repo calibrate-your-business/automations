@@ -4,10 +4,11 @@
 Bidirectional daily sync of Claude Code's file-based memory, a workaround for
 the auto-memory the CLI writes regardless of instruction. Two directions:
 
-  CAPTURE  native memory files -> $BRAIN_DB/raw/agent-memory/<host>/ (an
-           immutable, versioned record of whatever Claude wrote; signal for the
-           session-learnings pass). Per-project scribbles are removed after a
-           verified copy; the shared canonical slot is captured but not deleted.
+  CAPTURE  native memory files -> $BRAIN_DB/raw/agent-memory/<host>/ (a per-host
+           backup + signal for the session-learnings pass). Per-project memory is
+           FIRST-CLASS, human-curated (real frontmatter + a curated MEMORY.md
+           index) -- it is captured and LEFT IN PLACE, NEVER deleted. The shared
+           canonical slot is likewise captured but not deleted.
 
   RESTORE  the CANONICAL memory ($BRAIN_DB/memory/MEMORY.md, the tracked source
            of truth) -> the native memory slot Claude reads at session start, so
@@ -16,9 +17,10 @@ the auto-memory the CLI writes regardless of instruction. Two directions:
            gitignored, never pushed) is restored into the slot alongside it.
 
 The native slot is Claude Code's auto-memory dir. With `autoMemoryDirectory` set
-in ~/.claude/settings.json all projects share one dir (env AUTO_MEMORY_DIR here,
-default ~/.claude/memory); legacy per-project dirs under
-~/.claude[/<cfg>]/projects/*/memory/ are also captured + swept.
+(e.g. the Mac) all projects share one global dir (env AUTO_MEMORY_DIR here,
+default ~/.claude/memory); without it (a per-project-memory machine) each project
+keeps its own curated ~/.claude[/<cfg>]/projects/*/memory/ that Claude reads for
+that project. Both are backed up and PRESERVED -- this job never deletes memory.
 
 Config (env): BRAIN_DB (default ~/Claude/brain-db); AUTO_MEMORY_DIR (default
 ~/.claude/memory). Extra config roots one per line in agent-ops/session-roots.local.
@@ -82,8 +84,9 @@ def main():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     captured = deleted = 0
 
-    # CAPTURE: the shared canonical slot (keep it), then legacy per-project dirs
-    # (sweep them -- with autoMemoryDirectory set they should stop appearing).
+    # CAPTURE: the shared canonical slot (keep it), then per-project curated
+    # memory. Per-project memory is first-class -- back it up per host and LEAVE
+    # IT IN PLACE (delete=False); this job never sweeps curated memory.
     # CAPABILITIES.md is a machine-DERIVED artifact restored into the slot below,
     # not real agent memory -- never capture it into the store.
     if AUTO_MEMORY_DIR.exists():
@@ -96,7 +99,7 @@ def main():
         for mf in sorted(glob.glob(str(root / "projects" / "*" / "memory" / "*.md"))):
             mf = pathlib.Path(mf)
             project = mf.parent.parent.name.lstrip("-")
-            c, d = capture_one(mf, project, delete=True)
+            c, d = capture_one(mf, project, delete=False)
             captured += c; deleted += d
 
     # RESTORE: canonical -> the native slot Claude reads at session start. Also
