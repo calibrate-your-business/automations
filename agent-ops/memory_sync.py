@@ -82,22 +82,28 @@ def capture_one(mf, project, delete):
 
 def slot_is_read():
     """True iff this machine's Claude Code reads AUTO_MEMORY_DIR at session start
-    -- i.e. an effective `autoMemoryDirectory` setting resolves to it. On a
-    per-project-memory machine (setting absent) this is False: restoring into the
-    slot would write a dir nothing reads. There, global memory is delivered by a
-    CLAUDE.md @import of the brain-db canonical instead (see the memory-sync
-    design)."""
+    -- i.e. an effective `autoMemoryDirectory` setting resolves to it AND
+    auto-memory is not disabled. On a per-project-memory machine (setting absent)
+    this is False: restoring into the slot would write a dir nothing reads. There,
+    global memory is delivered by a CLAUDE.md @import of the brain-db canonical
+    instead (see the memory-sync design)."""
     import json
     val = None
+    enabled = True
     for cfg in (HOME / ".claude" / "settings.json",
                 HOME / ".claude" / "settings.local.json"):   # local overrides base
         try:
             data = json.loads(cfg.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if isinstance(data, dict) and data.get("autoMemoryDirectory"):
+        if not isinstance(data, dict):
+            continue
+        if data.get("autoMemoryDirectory"):
             val = data["autoMemoryDirectory"]
-    if not val:
+        if "autoMemoryEnabled" in data:
+            enabled = data["autoMemoryEnabled"]
+    # A dir set but auto-memory explicitly disabled means the slot is unread.
+    if not val or enabled is False:
         return False
     try:
         return pathlib.Path(os.path.expanduser(val)).resolve() == AUTO_MEMORY_DIR.resolve()
