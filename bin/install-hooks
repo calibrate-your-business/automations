@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Install the scratch-guard pre-push hook into sibling repos.
+#
+# Copies hooks/pre-push into each sibling repo's .git/hooks/ so `scratch/` can
+# never be pushed to main. Idempotent; safe to re-run. Run once per machine.
+# Usage: bin/install-hooks [<repo> ...]   (default: all git repos beside this one)
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$HERE/hooks/pre-push"
+[ -f "$SRC" ] || { echo "no hook at $SRC" >&2; exit 1; }
+PARENT="$(dirname "$HERE")"
+
+install_one() {
+  local repo="$1" gd
+  gd=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || { echo "  skip $repo (not a repo)"; return 0; }
+  case "$gd" in /*) ;; *) gd="$repo/$gd" ;; esac      # make absolute
+  mkdir -p "$gd/hooks"
+  cp "$SRC" "$gd/hooks/pre-push"
+  chmod +x "$gd/hooks/pre-push"
+  echo "  installed -> $repo"
+}
+
+if [ "$#" -gt 0 ]; then
+  for r in "$@"; do install_one "$r"; done
+else
+  for d in "$PARENT"/*/; do
+    [ -e "${d}.git" ] || continue                    # skip non-repos + worktrees (worktrees have a .git FILE, still fine)
+    install_one "${d%/}"
+  done
+fi
