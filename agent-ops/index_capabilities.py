@@ -1,36 +1,41 @@
 #!/usr/bin/env python3
 """index_capabilities.py -- global agent-ops automation (owned by this repo).
 
-Scans the corp repos for skills and rewrites the "Capabilities index" section of
-the canonical operating memory ($BRAIN_DB/memory/MEMORY.md) so it always tracks
-the live skill dirs -- never a hand-maintained catalog that rots. Runs before the
-memory sync (which restores the canonical file into Claude's session slot).
+Scans THIS machine's corp repos for skills and writes a machine-LOCAL catalog to
+$BRAIN_DB/memory/CAPABILITIES.md, reflecting the repo/skill set actually checked
+out on this host. The catalog is regenerated per machine and is gitignored: it
+is a machine-DERIVED artifact and must never enter shared, pushed canon. (A
+shared, pushed index diverges the moment two machines have different repos
+checked out -- which is exactly what it used to do when it rewrote MEMORY.md.)
+The canonical MEMORY.md stays machine-agnostic and only points at this file;
+memory_sync restores CAPABILITIES.md into the session slot alongside it.
 
 Ground truth is each repo's `.claude/skills/*/SKILL.md` (or `skills/*/SKILL.md`,
-e.g. loops). Only the marked section is rewritten; the curated rest is untouched.
-Kept index-level (name + short purpose + repo) on a hard line budget to protect
-the 25KB/200-line memory load.
+e.g. loops). Only PRIMARY checkouts are scanned -- a worktree's `.git` is a FILE
+and a primary checkout's is a DIRECTORY, so worktrees (and non-repos) are skipped
+and a dev worktree never shows up as a phantom repo.
 
 Config (env): BRAIN_DB (default ~/Claude/brain-db); REPOS_HOME (default
-~/Claude). Does not commit -- the memory job commits brain-db once at the end.
+~/Claude). Never commits or pushes; writes only the local CAPABILITIES.md.
 """
-import os, re, glob, pathlib
+import os, re, socket, pathlib
 
 HOME = pathlib.Path.home()
 BRAIN_DB = pathlib.Path(os.environ.get("BRAIN_DB", HOME / "Claude" / "brain-db"))
 REPOS_HOME = pathlib.Path(os.environ.get("REPOS_HOME", HOME / "Claude"))
-CANONICAL = BRAIN_DB / "memory" / "MEMORY.md"
-START, END = "<!-- CAPABILITIES:START -->", "<!-- CAPABILITIES:END -->"
-MAX_LINES = 90          # hard budget for the generated section
-SKIP_DIRS = ("node_modules", ".venv", "site-packages", ".git", "_merge-test")
+OUTPUT = BRAIN_DB / "memory" / "CAPABILITIES.md"
+HOST = socket.gethostname().split(".")[0]
+MAX_LINES = 90          # hard budget for the generated list
 
 
 def corp_repos():
     out = []
     for d in sorted(REPOS_HOME.iterdir()):
-        if not d.is_dir() or d.name.endswith("-worktree"):
+        if not d.is_dir() or d.name.startswith("_") or d.name.endswith("-worktree"):
             continue
-        if d.name.startswith("_") or not (d / ".git").exists():
+        # PRIMARY checkouts only: a worktree's .git is a FILE (gitdir pointer),
+        # a primary checkout's is a DIRECTORY. This also excludes non-repos.
+        if not (d / ".git").is_dir():
             continue
         out.append(d)
     return out
@@ -99,19 +104,18 @@ def build_section():
 
 
 def main():
-    if not CANONICAL.exists():
-        print(f"  WARN no canonical memory at {CANONICAL}"); return
-    text = CANONICAL.read_text(encoding="utf-8")
-    if START not in text or END not in text:
-        print("  WARN capability markers missing in canonical MEMORY.md"); return
     section = build_section()
-    new = re.sub(re.escape(START) + r".*?" + re.escape(END),
-                 f"{START}\n{section}\n{END}", text, flags=re.S)
-    if new != text:
-        CANONICAL.write_text(new, encoding="utf-8")
-        print(f"capabilities-index: updated ({section.count(chr(10)) + 1} lines)")
-    else:
-        print("capabilities-index: unchanged")
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        f"# Capabilities index ({HOST}) -- generated, machine-local, do not edit\n\n"
+        "Skills across the corp repos checked out on THIS machine, and when to\n"
+        "reach for them. Regenerated nightly by `agent-ops/index_capabilities.py`\n"
+        "from each repo's `.claude/skills/` (or `skills/`). This file is gitignored\n"
+        "and per-machine; the shared canonical MEMORY.md only points here.\n\n"
+        f"{section}\n"
+    )
+    OUTPUT.write_text(body, encoding="utf-8")
+    print(f"capabilities-index[{HOST}]: wrote {OUTPUT} ({section.count(chr(10)) + 1} skill lines)")
 
 
 if __name__ == "__main__":
