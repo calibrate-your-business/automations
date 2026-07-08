@@ -6,5 +6,6 @@ com.cyb.scratch-sweep.
 
 | item | status | created | next action |
 |---|---|---|---|
-| scratch/memory-sync-design/findings.md | IMPLEMENTED on faith (main, local) | 2026-07-07 | see faith-implementation.md |
-| scratch/memory-sync-design/faith-implementation.md | done + validated; awaiting owner go | 2026-07-07 | owner: (1) re-arm com.cyb.memory on faith? (2) push automations main + brain-db canon (coordinate Mac + apply delete=False there) |
+| scratch/memory-sync-design/findings.md | IMPLEMENTED on faith (main) | 2026-07-07 | see faith-implementation.md |
+| scratch/memory-sync-design/faith-implementation.md | done + validated | 2026-07-07 | superseded by the review below |
+| scratch/memory-sync-design/review-verdict.md | REVIEWED: GO; brain-db reconciled (ee9fc25) | 2026-07-07 | faith: reset brain-db to origin/main (drop dup 1e52ce9), then re-arm com.cyb.memory; Mac: pull both repos |
