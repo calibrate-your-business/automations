@@ -1,0 +1,9 @@
+# agent-ops: morning WIP nudge. Reads each repo's scratch-branch WIP.md and
+# notifies with review pointers, so parked work does not rot. Runs on ONE machine
+# (the script host-guards to macOS -- the attended machine); machine affinity is
+# future work in the scheduler backend. Swap the notifier to a phone push later.
+LABEL=com.cyb.scratch-sweep
+SCHEDULE=08:00
+RUNTIME=script
+COMMAND=bash agent-ops/scratch_sweep.sh
+WORKDIR=.
