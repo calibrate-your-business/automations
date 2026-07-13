@@ -3,6 +3,6 @@
 LABEL=com.cyb.session-learnings
 SCHEDULE=03:30
 RUNTIME=claude
-MODEL=claude-fable-5
+MODEL=claude-opus-4-8
 COMMAND=Read agent-ops/session-learnings.prompt.md and execute it exactly as written. BRAIN_DB is ~/Claude/brain-db.
 WORKDIR=.
