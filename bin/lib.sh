@@ -151,8 +151,18 @@ parse_job() {
     echo "automations: $jobfile sets MODEL but RUNTIME=$JOB_RUNTIME (only meaningful for claude; ignored)" >&2
     JOB_MODEL=""
   fi
-  if [[ ! "$JOB_SCHEDULE" =~ ^[0-9]{1,2}:[0-9]{2}$ ]]; then
-    echo "automations: $jobfile has invalid SCHEDULE '$JOB_SCHEDULE' (want HH:MM)" >&2
+  # SCHEDULE is either daily HH:MM (original form) or a sub-daily interval
+  # every:<N>m / every:<N>h (N a positive integer of minutes/hours). Anything
+  # else -- including a zero interval or a bad unit -- is rejected loudly.
+  if [[ "$JOB_SCHEDULE" =~ ^[0-9]{1,2}:[0-9]{2}$ ]]; then
+    :  # daily HH:MM -- unchanged
+  elif [[ "$JOB_SCHEDULE" =~ ^every:([0-9]+)[mh]$ ]]; then
+    if [[ "$(( 10#${BASH_REMATCH[1]} ))" -lt 1 ]]; then
+      echo "automations: $jobfile has invalid SCHEDULE '$JOB_SCHEDULE' (interval must be >= 1; want every:<N>m or every:<N>h)" >&2
+      return 1
+    fi
+  else
+    echo "automations: $jobfile has invalid SCHEDULE '$JOB_SCHEDULE' (want HH:MM or every:<N>m / every:<N>h)" >&2
     return 1
   fi
   return 0
@@ -162,6 +172,26 @@ parse_job() {
 # zeros so the plist gets valid <integer>s, not octal).
 schedule_hour() { local s="$1"; echo "$(( 10#${s%%:*} ))"; }
 schedule_min()  { local s="$1"; echo "$(( 10#${s##*:} ))"; }
+
+# True (returns 0) when SCHEDULE is the sub-daily interval form
+# (every:<N>m / every:<N>h); non-zero for daily HH:MM. Used to pick the
+# interval vs calendar branch in both renderers.
+schedule_is_interval() { [[ "$1" =~ ^every:[0-9]+[mh]$ ]]; }
+
+# Echo an interval SCHEDULE (every:<N>m / every:<N>h) as whole seconds. Assumes
+# the form was already validated by parse_job (N >= 1). 10# forces decimal so a
+# value like 08 is not read as octal. Feeds launchd StartInterval and systemd
+# OnUnitActiveSec -- both take an integer count of seconds.
+schedule_interval_seconds() {
+  local s="$1" body unit n
+  body="${s#every:}"          # strip the every: prefix
+  unit="${body: -1}"          # trailing m or h
+  n="$(( 10#${body%[mh]} ))"  # leading integer, decimal
+  case "$unit" in
+    m) echo "$(( n * 60 ))" ;;
+    h) echo "$(( n * 3600 ))" ;;
+  esac
+}
 
 # ---------------------------------------------------------------------------
 # discovery: registrations -> source-repo roots -> *.autojob
@@ -228,13 +258,27 @@ discover_jobs() {
 # currently-parsed job to stdout. Both point the scheduler at the same runtime
 # entrypoint: `bash lib.sh run <JOB_FILE>`.
 
-# macOS/launchd. No RunAtLoad: jobs fire only on their StartCalendarInterval.
-# launchd runs a missed slot once on next wake.
+# macOS/launchd. No RunAtLoad: jobs fire only on their schedule. A daily job
+# uses StartCalendarInterval (launchd runs a missed slot once on next wake); an
+# every:<N>m/h interval job uses StartInterval (seconds between fires).
 render_plist() {
-  local hour min launchlog
-  hour="$(schedule_hour "$JOB_SCHEDULE")"
-  min="$(schedule_min "$JOB_SCHEDULE")"
+  local launchlog schedblock
   launchlog="$AUTO_LOG_BASE/$JOB_LABEL/$JOB_LABEL.launchd.log"
+  if schedule_is_interval "$JOB_SCHEDULE"; then
+    schedblock="    <key>StartInterval</key>
+    <integer>$(schedule_interval_seconds "$JOB_SCHEDULE")</integer>"
+  else
+    local hour min
+    hour="$(schedule_hour "$JOB_SCHEDULE")"
+    min="$(schedule_min "$JOB_SCHEDULE")"
+    schedblock="    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$hour</integer>
+        <key>Minute</key>
+        <integer>$min</integer>
+    </dict>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -249,13 +293,7 @@ render_plist() {
         <string>run</string>
         <string>$JOB_FILE</string>
     </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>$hour</integer>
-        <key>Minute</key>
-        <integer>$min</integer>
-    </dict>
+$schedblock
     <key>StandardOutPath</key>
     <string>$launchlog</string>
     <key>StandardErrorPath</key>
@@ -285,6 +323,25 @@ UNIT
 }
 
 render_timer() {
+  # An every:<N>m/h interval renders a monotonic timer: OnBootSec arms the first
+  # fire an interval after the user manager starts, OnUnitActiveSec repeats it
+  # every interval thereafter. (Persistent is a no-op for monotonic timers -- it
+  # only replays missed OnCalendar slots -- so it is omitted here.)
+  if schedule_is_interval "$JOB_SCHEDULE"; then
+    local secs; secs="$(schedule_interval_seconds "$JOB_SCHEDULE")"
+    cat <<UNIT
+[Unit]
+Description=automations timer for $JOB_LABEL
+
+[Timer]
+OnBootSec=$secs
+OnUnitActiveSec=$secs
+
+[Install]
+WantedBy=timers.target
+UNIT
+    return
+  fi
   # OnCalendar wants HH:MM:SS in local time. JOB_SCHEDULE is validated HH:MM.
   cat <<UNIT
 [Unit]
