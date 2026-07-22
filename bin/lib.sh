@@ -193,13 +193,31 @@ registered_roots() {
 }
 
 # Print (one per line) every automations/*.autojob under each registered root.
-# Skips .git. Stable, de-duplicated by path.
+# Stable, de-duplicated by path.
+#
+# Only jobs whose OWNING repo root IS the registered root count. A nested git
+# worktree under the checkout -- an ephemeral agent worktree (.claude/worktrees/
+# agent-*) or any `git worktree add` -- carries a full copy of the tree, so it
+# holds duplicate *.autojob files. Its .git is a FILE (not a dir), so the plain
+# `-name .git -prune` does NOT stop find descending into it; without the
+# owning_root guard the same LABEL gets enumerated once per worktree, and on
+# install a stale branch copy can clobber the canonical job's model/schedule
+# (last-writer-wins). The owning_root check drops every such copy: a nested
+# worktree's owning root is the worktree dir, not the registered root. The
+# `.claude/worktrees` prune is the matching speed win -- don't walk those trees
+# at all. (An .autojob never legitimately lives under .claude/.)
 discover_jobs() {
-  local r
+  local r f
   while IFS= read -r r; do
     [[ -n "$r" ]] || continue
-    find "$r" -type d -name .git -prune -o \
-         -type f -path '*/automations/*.autojob' -print 2>/dev/null
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      [[ "$(owning_root "$f")" == "$r" ]] && printf '%s\n' "$f"
+    done < <(
+      find "$r" -type d -name .git -prune -o \
+                -type d -path '*/.claude/worktrees' -prune -o \
+                -type f -path '*/automations/*.autojob' -print 2>/dev/null
+    )
   done < <(registered_roots) | LC_ALL=C sort -u
 }
 
