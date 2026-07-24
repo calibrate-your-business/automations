@@ -230,6 +230,20 @@ discover_jobs() {
 
 # macOS/launchd. No RunAtLoad: jobs fire only on their StartCalendarInterval.
 # launchd runs a missed slot once on next wake.
+#
+# ProcessType=Interactive, NOT Background. These jobs fire overnight (03:00-05:15)
+# while the owner is asleep and the display has been off for hours. With
+# ProcessType=Background, once macOS's inactivity predictor decides the user is
+# away (~5 min after last activity), it THROTTLES/defers background-QoS processes
+# -- even on an AC-powered machine set to never sleep. That froze com.cyb.leadgen-
+# audit mid-run for 3h17m (05:15 -> resumed the instant the display came on at
+# 08:32); a headless claude job stalled all night is invisible and burns the run
+# window. caffeinate does NOT fix it: the freeze is per-process background-QoS
+# throttling, not system idle-sleep (proven -- the Claude desktop app held a
+# PreventUserIdleSystemSleep assertion the whole time and the job still froze).
+# Interactive is the one ProcessType Apple documents as "not throttled"; these
+# nightly jobs have no foreground work to compete with, so the higher priority
+# costs nothing. (s: automations session 2026-07-23.)
 render_plist() {
   local hour min launchlog
   hour="$(schedule_hour "$JOB_SCHEDULE")"
@@ -261,7 +275,7 @@ render_plist() {
     <key>StandardErrorPath</key>
     <string>$launchlog</string>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
 </dict>
 </plist>
 PLIST
